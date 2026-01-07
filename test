@@ -1,0 +1,222 @@
+import discord
+from discord.ext import commands
+from discord import app_commands
+import asyncio, sqlite3, datetime, threading
+from flask import Flask, request, jsonify
+
+TOKEN = "MTQ1ODEyNzgzNTc5MjQxMjc2MA.GdAfwl.E0jtXBsicm3Pn3VoUqA9n9Bn-zJkNU_xK2bWss"
+API_SECRET = "KCOMM00097"
+
+intents = discord.Intents.default()
+intents.members = True
+intents.message_content = True
+
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+# ---------------- DATABASE ----------------
+db = sqlite3.connect("bot.db")
+cur = db.cursor()
+cur.execute("CREATE TABLE IF NOT EXISTS logs(time TEXT, action TEXT, user TEXT, moderator TEXT, reason TEXT)")
+cur.execute("CREATE TABLE IF NOT EXISTS warns(user_id INTEGER, reason TEXT)")
+cur.execute("CREATE TABLE IF NOT EXISTS restricted(word TEXT)")
+cur.execute("CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT)")
+cur.execute("CREATE TABLE IF NOT EXISTS tempbans(user_id INTEGER)")
+db.commit()
+
+# ---------------- SETTINGS ----------------
+def get_setting(key, default):
+    r = cur.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    return r[0] if r else default
+
+def set_setting(key, value):
+    cur.execute("INSERT OR REPLACE INTO settings VALUES (?,?)", (key, value))
+    db.commit()
+
+case_sensitive = get_setting("case_sensitive", "false")=="true"
+use_default = get_setting("use_default", "true")=="true"
+default_words = {"fuck","shit","bastard","motherfucker","spam"}
+
+# ---------------- UTILS ----------------
+async def dm_user(user, guild, moderator, action, reason):
+    try:
+        await user.send(
+            f"🔔 **Moderation Action**\nServer: {guild.name}\nAction: {action}\nModerator: {moderator}\nReason: {reason}\nTime: {datetime.datetime.utcnow()}"
+        )
+    except:
+        pass
+
+def log(action, user, moderator, reason):
+    cur.execute("INSERT INTO logs VALUES (?,?,?,?,?)", (str(datetime.datetime.utcnow()), action, str(user), str(moderator), reason))
+    db.commit()
+
+# ---------------- EVENTS ----------------
+@bot.event
+async def on_ready():
+    await bot.tree.sync()
+    print("ONLINE:", bot.user)
+
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+    content = message.content if case_sensitive else message.content.lower()
+    words = {w[0] for w in cur.execute("SELECT word FROM restricted").fetchall()}
+    if use_default: words |= default_words
+    for w in words:
+        check = w if case_sensitive else w.lower()
+        if check in content:
+            await message.delete()
+            await message.channel.send("❌ Restricted word used.", delete_after=3)
+            return
+    await bot.process_commands(message)
+
+# ---------------- SAY / ECHO ----------------
+@bot.tree.command()
+async def say(interaction: discord.Interaction, message: str):
+    await interaction.channel.send(message)
+    await interaction.response.send_message("Sent.", ephemeral=True)
+
+@bot.tree.command()
+async def echo(interaction: discord.Interaction, message: str):
+    await say(interaction, message)
+
+# ---------------- MODERATION ----------------
+@bot.tree.command()
+async def warn(interaction: discord.Interaction, user: discord.Member, reason: str):
+    cur.execute("INSERT INTO warns VALUES (?,?)", (user.id, reason))
+    db.commit()
+    log("WARN", user, interaction.user, reason)
+    await dm_user(user, interaction.guild, interaction.user, "WARN", reason)
+    await interaction.response.send_message("User warned.")
+
+@bot.tree.command()
+async def kick(interaction: discord.Interaction, user: discord.Member, reason: str):
+    await user.kick(reason=reason)
+    log("KICK", user, interaction.user, reason)
+    await dm_user(user, interaction.guild, interaction.user, "KICK", reason)
+    await interaction.response.send_message("User kicked.")
+
+@bot.tree.command()
+async def ban(interaction: discord.Interaction, user: discord.Member, reason: str):
+    await user.ban(reason=reason)
+    log("BAN", user, interaction.user, reason)
+    await dm_user(user, interaction.guild, interaction.user, "BAN", reason)
+    await interaction.response.send_message("User banned.")
+
+@bot.tree.command()
+async def unban(interaction: discord.Interaction, userid: int):
+    user = await bot.fetch_user(userid)
+    await interaction.guild.unban(user)
+    await interaction.response.send_message("User unbanned.")
+
+@bot.tree.command()
+async def purge(interaction: discord.Interaction, amount: int):
+    await interaction.channel.purge(limit=amount)
+    await interaction.response.send_message("Purged.", ephemeral=True)
+
+# ---------------- RESTRICTIONS ----------------
+@bot.tree.command()
+async def restrictword(interaction: discord.Interaction, word: str):
+    cur.execute("INSERT INTO restricted VALUES (?)", (word,))
+    db.commit()
+    await interaction.response.send_message(f"Restricted `{word}`")
+
+@bot.tree.command()
+async def allowrule(interaction: discord.Interaction, word: str):
+    cur.execute("DELETE FROM restricted WHERE word=?", (word,))
+    db.commit()
+    await interaction.response.send_message(f"Allowed `{word}`")
+
+@bot.tree.command()
+async def restrictconfig(interaction: discord.Interaction, setting: str, value: str):
+    global case_sensitive, use_default
+    if setting=="casesensitive":
+        case_sensitive = value.lower()=="true"
+        set_setting("case_sensitive", value.lower())
+    elif setting=="default":
+        use_default = value.lower()=="true"
+        set_setting("use_default", value.lower())
+    else:
+        await interaction.response.send_message("Invalid setting")
+        return
+    await interaction.response.send_message("Restriction config updated.")
+
+@bot.tree.command()
+async def showrestrictedlist(interaction: discord.Interaction):
+    words = [w[0] for w in cur.execute("SELECT word FROM restricted")]
+    await interaction.response.send_message(", ".join(words) or "None")
+
+# ---------------- DISCO ----------------
+@bot.tree.command()
+async def disco(interaction: discord.Interaction, confirm: bool):
+    if not confirm:
+        await interaction.response.send_message("Confirm required.", ephemeral=True)
+        return
+    guild = interaction.guild
+    chans = [await guild.create_text_channel(f"🌈-rainbow-{i}") for i in range(1,5)]
+    for _ in range(12):
+        for c in chans: await c.send("🌈💃 DISCO 💃🌈")
+        await asyncio.sleep(1)
+    for c in chans: await c.delete()
+    await interaction.response.send_message("Disco finished.")
+
+# ---------------- LOGGING ----------------
+@bot.tree.command()
+async def log(interaction: discord.Interaction):
+    rows = cur.execute("SELECT * FROM logs ORDER BY time DESC LIMIT 10").fetchall()
+    await interaction.response.send_message("```"+"\n".join(map(str,rows))+"```")
+
+@bot.tree.command()
+async def removelog(interaction: discord.Interaction):
+    cur.execute("DELETE FROM logs LIMIT 1")
+    db.commit()
+    await interaction.response.send_message("Oldest log removed.")
+
+@bot.tree.command()
+async def removealllogs(interaction: discord.Interaction):
+    cur.execute("DELETE FROM logs")
+    db.commit()
+    await interaction.response.send_message("All logs cleared.")
+
+# ---------------- ERROR TEST ----------------
+@bot.tree.command()
+async def errorcode(interaction: discord.Interaction, code: int):
+    await interaction.response.send_message(f"Triggered error code {code}")
+
+@bot.tree.command()
+async def errorname(interaction: discord.Interaction, name: str):
+    await interaction.response.send_message(f"Triggered error `{name}`")
+
+# ---------------- LIVE CONTROL API ----------------
+app = Flask(__name__)
+def run_flask(): app.run(host="0.0.0.0", port=5000)
+threading.Thread(target=run_flask, daemon=True).start()
+
+@app.route("/command", methods=["POST"])
+def api_command():
+    data = request.json
+    if not data or data.get("secret") != API_SECRET: return jsonify({"error":"Unauthorized"}), 403
+    action = data.get("action")
+    guild_id = int(data.get("guild_id",0))
+    message = data.get("message","")
+    guild = discord.utils.get(bot.guilds, id=guild_id)
+    if not guild: return jsonify({"error":"Guild not found"}), 404
+    async def run_action():
+        if action=="disco":
+            chans = [await guild.create_text_channel(f"🌈-rainbow-{i}") for i in range(1,5)]
+            for _ in range(12):
+                for c in chans: await c.send("🌈💃 DISCO 💃🌈")
+                await asyncio.sleep(1)
+            for c in chans: await c.delete()
+        elif action=="say" and message:
+            ch = next((c for c in guild.text_channels), None)
+            if ch: await ch.send(message)
+        elif action=="echo" and message:
+            ch = next((c for c in guild.text_channels), None)
+            if ch: await ch.send(message)
+        elif action=="stopbot":
+            await bot.close()
+    asyncio.run_coroutine_threadsafe(run_action(), bot.loop)
+    return jsonify({"status":"ok"})
+
+bot.run(TOKEN)
