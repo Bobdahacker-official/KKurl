@@ -4,7 +4,7 @@ from discord import app_commands
 import asyncio, sqlite3, datetime, threading
 from flask import Flask, request, jsonify
 
-TOKEN = "MTQ1ODEyNzgzNTc5MjQxMjc2MA.GdAfwl.E0jtXBsicm3Pn3VoUqA9n9Bn-zJkNU_xK2bWss"
+TOKEN = "blossom"
 API_SECRET = "KCOMM00097"
 
 intents = discord.Intents.default()
